@@ -1,19 +1,53 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+from typing import List
+
 from app.database import get_db
 from app.models.user import User
-from app.schemas.user import UserSignup, UserLogin, ChangePassword
+from app.schemas.user import (
+    UserSignup,
+    ChangePassword,
+    UpdateProfile,
+    UserOut
+)
 from app.utils.password import hash_password, verify_password
-from app.core.security import create_access_token
+from app.core.security import create_access_token, verify_access_token
 
 router = APIRouter(prefix="/auth", tags=["FORM"])
+
+# Authorization: Bearer <token>
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+
+def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    payload = verify_access_token(token)
+    user_id = payload.get("user_id")
+
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token"
+        )
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return user
+
 
 
 @router.post("/signup")
 def signup(user: UserSignup, db: Session = Depends(get_db)):
-    existing_user = db.query(User).filter(User.email == user.email).first()
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
+    if db.query(User).filter(User.email == user.email).first():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
 
     new_user = User(
         firstname=user.firstname,
@@ -29,57 +63,84 @@ def signup(user: UserSignup, db: Session = Depends(get_db)):
     return {"message": "User registered successfully"}
 
 
-@router.post("/login")
-def login(user: UserLogin, db: Session = Depends(get_db)):
-    #this will help us gte the email for the login
-    db_user = db.query(User).filter(User.email == user.email).first()
 
-   
-    if not db_user or not verify_password(user.password, db_user.password):
+@router.post("/login")
+def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
+    user = db.query(User).filter(User.email == form_data.username).first()
+
+    if not user or not verify_password(form_data.password, user.password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials"
         )
 
-    
-    try:
-        token = create_access_token({"user_id": db_user.id})
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Token generation failed"
-        )
+    token = create_access_token({
+        "user_id": user.id,
+        "email": user.email
+    })
 
-  
-    return {
-        "message": "Login successful",
-        "access_token": token,
-        "token_type": "bearer"
-    }
+    return {"access_token": token, "token_type": "bearer"}
 
 
 
 @router.put("/change-password")
-def change_password(data: ChangePassword, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == data.email).first()
+def change_password(
+    data: ChangePassword,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not verify_password(data.old_password, current_user.password):
+        raise HTTPException(status_code=401, detail="Invalid old password")
 
-   
-    if not user or not verify_password(data.old_password, user.password):
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid credentials"
-        )
-
-   
-    if verify_password(data.new_password, user.password):
+    if verify_password(data.new_password, current_user.password):
         raise HTTPException(
             status_code=400,
-            detail="New password must be different from the old password"
+            detail="New password must be different"
         )
 
-    
-    user.password = hash_password(data.new_password)
+    current_user.password = hash_password(data.new_password)
     db.commit()
 
     return {"message": "Password updated successfully"}
 
+
+@router.put("/profile/update")
+def update_profile(
+    data: UpdateProfile,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not data.firstname and not data.lastname:
+        raise HTTPException(
+            status_code=400,
+            detail="At least firstname or lastname is required"
+        )
+
+    if data.firstname:
+        current_user.firstname = data.firstname
+
+    if data.lastname:
+        current_user.lastname = data.lastname
+
+    db.commit()
+    db.refresh(current_user)
+
+    return {
+        "firstname": current_user.firstname,
+        "lastname": current_user.lastname,
+        "email": current_user.email,
+        "createdat": current_user.createdat
+    }
+
+
+# ---------------- ADMIN: LIST USERS (PROTECTED) ----------------
+@router.get("/admin/users")
+def list_all_users(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    users = db.query(User).all()
+    return users
