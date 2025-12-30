@@ -1,34 +1,49 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+from typing import List
 
 from app.database import get_db
 from app.models.user import User
-from app.schemas.user import UserSignup, ChangePassword
+from app.schemas.user import (
+    UserSignup,
+    ChangePassword,
+    UpdateProfile,
+    UserOut
+)
 from app.utils.password import hash_password, verify_password
 from app.core.security import create_access_token, verify_access_token
 
-
 router = APIRouter(prefix="/auth", tags=["FORM"])
 
-# OAuth2 scheme (used for protected routes)
+# Authorization: Bearer <token>
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
-def get_current_user(token: str = Depends(oauth2_scheme)):
-    """
-    Extract and verify JWT token.
-    Returns payload if token is valid.
-    """
+def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
     payload = verify_access_token(token)
-    return payload
+    user_id = payload.get("user_id")
+
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token"
+        )
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return user
 
 
-# ---------------- SIGNUP ----------------
+
 @router.post("/signup")
 def signup(user: UserSignup, db: Session = Depends(get_db)):
-    existing_user = db.query(User).filter(User.email == user.email).first()
-    if existing_user:
+    if db.query(User).filter(User.email == user.email).first():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
@@ -48,15 +63,13 @@ def signup(user: UserSignup, db: Session = Depends(get_db)):
     return {"message": "User registered successfully"}
 
 
-# ---------------- LOGIN (OAuth2) ----------------
+
 @router.post("/login")
 def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
-    user = db.query(User).filter(
-        User.email == form_data.username
-    ).first()
+    user = db.query(User).filter(User.email == form_data.username).first()
 
     if not user or not verify_password(form_data.password, user.password):
         raise HTTPException(
@@ -69,114 +82,65 @@ def login(
         "email": user.email
     })
 
-    return {
-        "access_token": token,
-        "token_type": "bearer"
-    }
+    return {"access_token": token, "token_type": "bearer"}
 
 
-# ---------------- CHANGE PASSWORD ----------------
+
 @router.put("/change-password")
-def change_password(data: ChangePassword, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == data.email).first()
+def change_password(
+    data: ChangePassword,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not verify_password(data.old_password, current_user.password):
+        raise HTTPException(status_code=401, detail="Invalid old password")
 
-    if not user or not verify_password(data.old_password, user.password):
+    if verify_password(data.new_password, current_user.password):
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials"
+            status_code=400,
+            detail="New password must be different"
         )
 
-    # New password must be different
-    if verify_password(data.new_password, user.password):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="New password must be different from the old password"
-        )
-
-    user.password = hash_password(data.new_password)
+    current_user.password = hash_password(data.new_password)
     db.commit()
 
     return {"message": "Password updated successfully"}
 
 
-from app.schemas.user import UpdateProfile
-from app.schemas.user import UserSignup, ChangePassword, UpdateProfile
-
-
-# ---------------- UPDATE PROFILE ----------------
 @router.put("/profile/update")
 def update_profile(
     data: UpdateProfile,
-    token: str = Depends(oauth2_scheme),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    
-    payload = verify_access_token(token)
-    user_id = payload.get("user_id")
-
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token"
-        )
-
-    
     if not data.firstname and not data.lastname:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least one field (firstname or lastname) is required"
+            status_code=400,
+            detail="At least firstname or lastname is required"
         )
 
-   
-    user = db.query(User).filter(User.id == user_id).first()
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-
-    
     if data.firstname:
-        user.firstname = data.firstname
+        current_user.firstname = data.firstname
 
     if data.lastname:
-        user.lastname = data.lastname
+        current_user.lastname = data.lastname
 
     db.commit()
-    db.refresh(user)
+    db.refresh(current_user)
 
     return {
-        "firstname": user.firstname,
-        "lastname": user.lastname,
-        "email": user.email,
-        "createdat": user.createdat
+        "firstname": current_user.firstname,
+        "lastname": current_user.lastname,
+        "email": current_user.email,
+        "createdat": current_user.createdat
     }
-from app.schemas.user import UserOut
-from typing import List
-# ---------------- ADMIN: LIST ALL USERS ----------------
-"""@router.get("/admin/users", response_model=List[UserOut])
-def list_all_users(
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
-):
-    users = db.query(User).all()
-    return users
-"""
 
-from typing import List
-from app.schemas.user import UserOut
-from app.models.user import User
 
-@router.get("/admin/users", response_model=List[UserOut])
+# ---------------- ADMIN: LIST USERS (PROTECTED) ----------------
+@router.get("/admin/users")
 def list_all_users(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    # OPTIONAL: if you have admin role
-    # if not current_user.is_admin:
-    #     raise HTTPException(status_code=403, detail="Admins only")
-
     users = db.query(User).all()
     return users
-
