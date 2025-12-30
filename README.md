@@ -46,7 +46,7 @@ Handles password hashing and verification using bcrypt.
 
 ---
 
-## 🔐 How Authentication Works
+##  How Authentication Works
 
 1. User signs up → password is hashed and stored in database.
 2. User logs in → credentials are verified.
@@ -56,7 +56,7 @@ Handles password hashing and verification using bcrypt.
 
 ---
 
-## 🧠 Key Features
+## Key Features
 
 - Secure password hashing (bcrypt)
 - JWT token-based authentication
@@ -66,10 +66,4 @@ Handles password hashing and verification using bcrypt.
 
 ---
 
-## 🚀 Tech Stack
 
-- FastAPI
-- SQLAlchemy
-- PostgreSQL
-- JWT (python-jose)
-- Passlib (bcrypt)
